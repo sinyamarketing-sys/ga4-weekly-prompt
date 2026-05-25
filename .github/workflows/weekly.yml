@@ -30,8 +30,10 @@ jobs:
       - name: Generate prompt and upload to Drive
         env:
           GA4_PROPERTY_ID: ${{ secrets.GA4_PROPERTY_ID }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa.json
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
         run: python ga4_to_prompt.py
 
       - name: Upload output as artifact (備份)
@@ -41,4 +43,3 @@ jobs:
           name: ga4-output-${{ github.run_number }}
           path: output/
           retention-days: 30
-          
