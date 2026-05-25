@@ -1,0 +1,23 @@
+# Service account 金鑰絕對不能進 repo
+*.json
+!package.json
+sa-key*
+service-account*
+credentials*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# 輸出
+output/
+*.md.bak
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
