@@ -89,16 +89,30 @@ def fetch_ga4_data():
         "previous_period": {"start": prev_start, "end": prev_end},
     }
 
-    # 總覽指標（含電商指標）
-    overview_metrics = [
+ # 總覽指標（GA4 限制單次最多 10 個 metric，拆成兩組查詢）
+    overview_metrics_basic = [
         "activeUsers", "newUsers", "sessions", "screenPageViews",
         "averageSessionDuration", "bounceRate", "engagementRate",
         "conversions", "totalRevenue", "transactions",
+    ]
+    overview_metrics_ecom = [
         "purchaseRevenue", "addToCarts", "checkouts",
         "ecommercePurchases", "itemViewEvents",
     ]
-    data["overview_current"] = run_report(client, [], overview_metrics, cur_start, cur_end, limit=1)
-    data["overview_previous"] = run_report(client, [], overview_metrics, prev_start, prev_end, limit=1)
+
+    def _fetch_overview(start, end):
+        basic = run_report(client, [], overview_metrics_basic, start, end, limit=1)
+        ecom = run_report(client, [], overview_metrics_ecom, start, end, limit=1)
+        merged = {}
+        if basic:
+            merged.update(basic[0])
+        if ecom:
+            merged.update(ecom[0])
+        return [merged] if merged else []
+
+    data["overview_current"] = _fetch_overview(cur_start, cur_end)
+    data["overview_previous"] = _fetch_overview(prev_start, prev_end)
+  
 
     # 來源/媒介
     data["top_sources"] = run_report(
