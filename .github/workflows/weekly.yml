@@ -1,0 +1,44 @@
+name: GA4 Weekly Report
+
+on:
+  schedule:
+    # 台北時間 (UTC+8) 每週一 08:00 = UTC 每週一 00:00
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # 允許手動觸發測試
+
+jobs:
+  generate-prompt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account credentials
+        env:
+          SA_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$SA_JSON" > /tmp/sa.json
+
+      - name: Generate prompt and upload to Drive
+        env:
+          GA4_PROPERTY_ID: ${{ secrets.GA4_PROPERTY_ID }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa.json
+        run: python ga4_to_prompt.py
+
+      - name: Upload output as artifact (備份)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga4-output-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+          
