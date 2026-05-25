@@ -2,15 +2,19 @@
 GA4 → Claude.ai Prompt Pack 自動生成器
 
 每週一 08:00 (台北時間) 由 GitHub Actions 觸發：
-1. 從 GA4 Data API 拉取上週 + 上上週數據
+1. 從 GA4 Data API 拉取上週 + 上上週數據 (用 Service Account)
 2. 整理成結構化 JSON
 3. 包成可直接貼到 Claude.ai 的 prompt（含分析指令）
-4. 上傳到 Google Drive 指定資料夾，同時生成 Markdown 和 Google Docs 兩種格式
+4. 用 OAuth 上傳到「個人 Drive」，自動建立 GA4 週報資料夾
+   (因為 Service Account 沒有 storage quota，無法寫個人 Drive)
 
 環境變數（透過 GitHub Secrets 注入）：
-  GA4_PROPERTY_ID       - GA4 屬性 ID
-  DRIVE_FOLDER_ID       - Google Drive 目標資料夾 ID
-  GOOGLE_APPLICATION_CREDENTIALS - Service Account JSON 路徑
+  GA4_PROPERTY_ID                - GA4 屬性 ID
+  GOOGLE_APPLICATION_CREDENTIALS - Service Account JSON 路徑（用來抓 GA4）
+  GOOGLE_OAUTH_CLIENT_ID         - OAuth Client ID（用來上傳 Drive）
+  GOOGLE_OAUTH_CLIENT_SECRET     - OAuth Client Secret
+  GOOGLE_OAUTH_REFRESH_TOKEN     - OAuth Refresh Token
+  DRIVE_FOLDER_NAME              - (選填) Drive 資料夾名稱，預設 "GA4 週報"
 """
 
 import os
@@ -22,14 +26,14 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     DateRange, Dimension, Metric, RunReportRequest, OrderBy,
 )
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials as OAuthCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 
 # ===== 設定 =====
 PROPERTY_ID = os.environ["GA4_PROPERTY_ID"]
-DRIVE_FOLDER_ID = os.environ["DRIVE_FOLDER_ID"]
+DRIVE_FOLDER_NAME = os.environ.get("DRIVE_FOLDER_NAME", "GA4 週報")
 REPORT_DAYS = 7  # 報表涵蓋天數
 TOP_N = 15       # 各維度取前 N 筆
 
@@ -89,7 +93,7 @@ def fetch_ga4_data():
         "previous_period": {"start": prev_start, "end": prev_end},
     }
 
- # 總覽指標（GA4 限制單次最多 10 個 metric，拆成兩組查詢）
+    # 總覽指標（GA4 限制單次最多 10 個 metric，拆成兩組查詢後合併）
     overview_metrics_basic = [
         "activeUsers", "newUsers", "sessions", "screenPageViews",
         "averageSessionDuration", "bounceRate", "engagementRate",
@@ -112,7 +116,6 @@ def fetch_ga4_data():
 
     data["overview_current"] = _fetch_overview(cur_start, cur_end)
     data["overview_previous"] = _fetch_overview(prev_start, prev_end)
-  
 
     # 來源/媒介
     data["top_sources"] = run_report(
@@ -263,21 +266,54 @@ def build_prompt(ga4_data: dict) -> str:
     return instructions
 
 
-# ===== 上傳到 Google Drive =====
-def upload_to_drive(local_md_path: str, ts: str):
-    """同時上傳 Markdown 檔案 + 建立 Google Docs"""
-    creds = service_account.Credentials.from_service_account_file(
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
-        scopes=["https://www.googleapis.com/auth/drive"],
+# ===== 上傳到 Google Drive（用 OAuth，存進個人 Drive）=====
+def _build_drive_service():
+    """用 OAuth refresh token 換 access token，建立 Drive client"""
+    creds = OAuthCredentials(
+        token=None,
+        refresh_token=os.environ["GOOGLE_OAUTH_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GOOGLE_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["GOOGLE_OAUTH_CLIENT_SECRET"],
+        scopes=["https://www.googleapis.com/auth/drive.file"],
     )
-    service = build("drive", "v3", credentials=creds)
+    return build("drive", "v3", credentials=creds)
+
+
+def _get_or_create_folder(service, name: str) -> str:
+    """搜尋同名資料夾，沒有就建一個（限定 drive.file scope 看得到的）"""
+    # 用 drive.file scope 只能看到本 OAuth client 自己建立的檔案
+    query = (
+        f"name = '{name}' "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    result = service.files().list(q=query, fields="files(id, name)", spaces="drive").execute()
+    folders = result.get("files", [])
+    if folders:
+        return folders[0]["id"]
+    # 沒有則新建
+    folder = service.files().create(
+        body={
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+        },
+        fields="id",
+    ).execute()
+    return folder["id"]
+
+
+def upload_to_drive(local_md_path: str, ts: str):
+    """同時上傳 Markdown 原檔 + 建立 Google Docs"""
+    service = _build_drive_service()
+    folder_id = _get_or_create_folder(service, DRIVE_FOLDER_NAME)
 
     base_name = f"GA4_週報_Prompt_{ts}"
 
-    # 1. 上傳 Markdown 原檔（方便複製貼上 Claude.ai）
+    # 1. 上傳 Markdown 原檔
     md_metadata = {
         "name": f"{base_name}.md",
-        "parents": [DRIVE_FOLDER_ID],
+        "parents": [folder_id],
         "mimeType": "text/markdown",
     }
     md_media = MediaFileUpload(local_md_path, mimetype="text/markdown")
@@ -285,10 +321,10 @@ def upload_to_drive(local_md_path: str, ts: str):
         body=md_metadata, media_body=md_media, fields="id, webViewLink"
     ).execute()
 
-    # 2. 同時建立 Google Docs（用 mimeType 轉換）
+    # 2. 同時建立 Google Docs（透過 mimeType 轉換）
     doc_metadata = {
         "name": base_name,
-        "parents": [DRIVE_FOLDER_ID],
+        "parents": [folder_id],
         "mimeType": "application/vnd.google-apps.document",
     }
     doc_media = MediaFileUpload(local_md_path, mimetype="text/markdown")
@@ -299,6 +335,7 @@ def upload_to_drive(local_md_path: str, ts: str):
     return {
         "markdown_link": md_file.get("webViewLink"),
         "doc_link": doc_file.get("webViewLink"),
+        "folder_id": folder_id,
     }
 
 
